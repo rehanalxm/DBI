@@ -1,35 +1,62 @@
-const mongoose = require('mongoose');
+const { DataTypes, Model } = require('sequelize');
+const { sequelize } = require('../config/db');
 
-const transactionSchema = new mongoose.Schema({
-  userId: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'User',
-    required: true,
-  },
-  type: {
-    type: String,
-    enum: ['deposit', 'withdraw'],
-    required: [true, 'Transaction type (deposit/withdraw) is required'],
-  },
-  amount: {
-    type: Number,
-    required: [true, 'Amount is required'],
-    min: [0.01, 'Amount must be greater than zero'],
-  },
-  category: {
-    type: String,
-    enum: ['salary', 'food', 'utilities', 'entertainment', 'shopping', 'transfer', 'other'],
-    default: 'other',
-  },
-  description: {
-    type: String,
-    trim: true,
-  },
-  createdAt: {
-    type: Date,
-    default: Date.now,
-  },
-});
+class Transaction extends Model {}
 
-const Transaction = mongoose.model('Transaction', transactionSchema);
+Transaction.init(
+  {
+    id: {
+      type: DataTypes.UUID,
+      defaultValue: DataTypes.UUIDV4,
+      primaryKey: true,
+    },
+    _id: {
+      type: DataTypes.VIRTUAL,
+      get() {
+        return this.id;
+      },
+    },
+    userId: {
+      type: DataTypes.UUID,
+      allowNull: false,
+    },
+    type: {
+      type: DataTypes.ENUM('deposit', 'withdraw'),
+      allowNull: false,
+    },
+    amount: {
+      type: DataTypes.DECIMAL(15, 2),
+      allowNull: false,
+      validate: {
+        min: {
+          args: [0.01],
+          msg: 'Amount must be greater than zero',
+        },
+      },
+      get() {
+        const rawValue = this.getDataValue('amount');
+        return rawValue ? parseFloat(rawValue) : 0;
+      },
+    },
+    category: {
+      type: DataTypes.ENUM('salary', 'food', 'utilities', 'entertainment', 'shopping', 'transfer', 'other'),
+      allowNull: false,
+      defaultValue: 'other',
+    },
+    description: {
+      type: DataTypes.STRING,
+      allowNull: true,
+    },
+  },
+  {
+    sequelize,
+    modelName: 'Transaction',
+  }
+);
+
+// Define associations
+const User = require('./User');
+Transaction.belongsTo(User, { foreignKey: 'userId', onDelete: 'CASCADE' });
+User.hasMany(Transaction, { foreignKey: 'userId' });
+
 module.exports = Transaction;

@@ -25,12 +25,12 @@ const registerUser = async (req, res) => {
     }
 
     // Check for existing user email
-    const userExists = await User.findOne({ email: email.toLowerCase() });
+    const userExists = await User.findOne({ where: { email: email.toLowerCase() } });
     if (userExists) {
       return res.status(400).json({ success: false, message: 'An account with this email already exists.' });
     }
 
-    // Create new user (triggering pre-save password hashing and account number generation)
+    // Create new user (triggering beforeCreate password hashing and account number generation hooks)
     const user = await User.create({
       name,
       email: email.toLowerCase(),
@@ -45,7 +45,8 @@ const registerUser = async (req, res) => {
       return res.status(201).json({
         success: true,
         message: 'Account registered successfully.',
-        _id: user._id,
+        _id: user.id, // Map database UUID to _id for frontend compatibility
+        id: user.id,
         name: user.name,
         email: user.email,
         phone: user.phone,
@@ -54,7 +55,7 @@ const registerUser = async (req, res) => {
         dob: user.dob,
         accountNumber: user.accountNumber,
         balance: user.balance,
-        token: generateToken(user._id),
+        token: generateToken(user.id),
       });
     } else {
       return res.status(400).json({ success: false, message: 'Invalid user data provided.' });
@@ -78,18 +79,19 @@ const loginUser = async (req, res) => {
     }
 
     // Retrieve user and compare password
-    const user = await User.findOne({ email: email.toLowerCase() });
+    const user = await User.findOne({ where: { email: email.toLowerCase() } });
 
     if (user && (await user.matchPassword(password))) {
       return res.status(200).json({
         success: true,
         message: 'Logged in successfully.',
-        _id: user._id,
+        _id: user.id, // Map database UUID to _id for frontend compatibility
+        id: user.id,
         name: user.name,
         email: user.email,
         accountNumber: user.accountNumber,
         balance: user.balance,
-        token: generateToken(user._id),
+        token: generateToken(user.id),
       });
     } else {
       return res.status(401).json({ success: false, message: 'Invalid email or password.' });

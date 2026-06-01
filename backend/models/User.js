@@ -1,113 +1,135 @@
-const mongoose = require('mongoose');
+const { DataTypes, Model } = require('sequelize');
+const { sequelize } = require('../config/db');
 const bcrypt = require('bcryptjs');
 
-const userSchema = new mongoose.Schema({
-  name: {
-    type: String,
-    required: [true, 'Name is required'],
-    trim: true,
-  },
-  email: {
-    type: String,
-    required: [true, 'Email is required'],
-    unique: true,
-    trim: true,
-    lowercase: true,
-    match: [/^\w+([\.-]?\w+)*@\w+([\.-]?\w+)*(\.\w{2,3})+$/, 'Please provide a valid email address'],
-  },
-  password: {
-    type: String,
-    required: [true, 'Password is required'],
-    minlength: [6, 'Password must be at least 6 characters long'],
-  },
-  phone: {
-    type: String,
-    required: [true, 'Phone number is required'],
-    trim: true,
-  },
-  address: {
-    type: String,
-    required: [true, 'Address is required'],
-    trim: true,
-  },
-  accountType: {
-    type: String,
-    required: [true, 'Account type is required'],
-    enum: {
-      values: ['savings', 'checking', 'business'],
-      message: '{VALUE} is not a valid account type'
+class User extends Model {
+  // Method to compare password
+  async matchPassword(enteredPassword) {
+    return await bcrypt.compare(enteredPassword, this.password);
+  }
+}
+
+User.init(
+  {
+    id: {
+      type: DataTypes.UUID,
+      defaultValue: DataTypes.UUIDV4,
+      primaryKey: true,
     },
-    default: 'savings',
-  },
-  dob: {
-    type: Date,
-    required: [true, 'Date of birth is required'],
-  },
-  isCardFrozen: {
-    type: Boolean,
-    default: false,
-  },
-  payees: [
-    {
-      name: {
-        type: String,
-        required: true,
+    _id: {
+      type: DataTypes.VIRTUAL,
+      get() {
+        return this.id;
       },
-      accountNumber: {
-        type: String,
-        required: true,
+    },
+    name: {
+      type: DataTypes.STRING,
+      allowNull: false,
+      validate: {
+        notEmpty: { msg: 'Name is required' },
       },
-      createdAt: {
-        type: Date,
-        default: Date.now,
-      }
-    }
-  ],
-  accountNumber: {
-    type: String,
-    unique: true,
+    },
+    email: {
+      type: DataTypes.STRING,
+      allowNull: false,
+      unique: true,
+      validate: {
+        isEmail: { msg: 'Please provide a valid email address' },
+        notEmpty: { msg: 'Email is required' },
+      },
+    },
+    password: {
+      type: DataTypes.STRING,
+      allowNull: false,
+      validate: {
+        notEmpty: { msg: 'Password is required' },
+        len: {
+          args: [6],
+          msg: 'Password must be at least 6 characters long',
+        },
+      },
+    },
+    phone: {
+      type: DataTypes.STRING,
+      allowNull: false,
+      validate: {
+        notEmpty: { msg: 'Phone number is required' },
+      },
+    },
+    address: {
+      type: DataTypes.STRING,
+      allowNull: false,
+      validate: {
+        notEmpty: { msg: 'Address is required' },
+      },
+    },
+    accountType: {
+      type: DataTypes.ENUM('savings', 'checking', 'business'),
+      allowNull: false,
+      defaultValue: 'savings',
+    },
+    dob: {
+      type: DataTypes.DATEONLY,
+      allowNull: false,
+      validate: {
+        notEmpty: { msg: 'Date of birth is required' },
+      },
+    },
+    isCardFrozen: {
+      type: DataTypes.BOOLEAN,
+      defaultValue: false,
+    },
+    accountNumber: {
+      type: DataTypes.STRING,
+      unique: true,
+    },
+    balance: {
+      type: DataTypes.DECIMAL(15, 2),
+      defaultValue: 0.00,
+      get() {
+        const rawValue = this.getDataValue('balance');
+        return rawValue ? parseFloat(rawValue) : 0;
+      },
+    },
   },
-  balance: {
-    type: Number,
-    default: 0, // Starts at 0; they can deposit money to get started
-  },
-  createdAt: {
-    type: Date,
-    default: Date.now,
-  },
-});
+  {
+    sequelize,
+    modelName: 'User',
+    hooks: {
+      beforeValidate: async (user) => {
+        if (user.email) {
+          user.email = user.email.toLowerCase().trim();
+        }
+      },
+      beforeCreate: async (user) => {
+        // Generate unique 10-digit account number if not present
+        if (!user.accountNumber) {
+          let accountNum;
+          let exists = true;
+          while (exists) {
+            accountNum = Math.floor(1000000000 + Math.random() * 9000000000).toString();
+            const checkUser = await User.findOne({ where: { accountNumber: accountNum } });
+            if (!checkUser) {
+              exists = false;
+            }
+          }
+          user.accountNumber = accountNum;
+        }
 
-// Pre-save hook to hash password and generate unique 10-digit account number
-userSchema.pre('save', async function (next) {
-  // Generate unique 10-digit account number if not present
-  if (!this.accountNumber) {
-    let accountNum;
-    let exists = true;
-    while (exists) {
-      // Generate random 10-digit number between 1000000000 and 9999999999
-      accountNum = Math.floor(1000000000 + Math.random() * 9000000000).toString();
-      // Access the User model directly to verify uniqueness
-      const checkUser = await this.constructor.findOne({ accountNumber: accountNum });
-      if (!checkUser) {
-        exists = false;
-      }
-    }
-    this.accountNumber = accountNum;
+        // Hash password
+        if (user.password) {
+          const salt = await bcrypt.genSalt(10);
+          user.password = await bcrypt.hash(user.password, salt);
+        }
+      },
+      beforeUpdate: async (user) => {
+        if (user.changed('password')) {
+          const salt = await bcrypt.genSalt(10);
+          user.password = await bcrypt.hash(user.password, salt);
+        }
+      },
+    },
   }
+);
 
-  // Hash password if modified
-  if (!this.isModified('password')) {
-    return next();
-  }
-  const salt = await bcrypt.genSalt(10);
-  this.password = await bcrypt.hash(this.password, salt);
-  next();
-});
-
-// Method to compare password
-userSchema.methods.matchPassword = async function (enteredPassword) {
-  return await bcrypt.compare(enteredPassword, this.password);
-};
-
-const User = mongoose.model('User', userSchema);
 module.exports = User;

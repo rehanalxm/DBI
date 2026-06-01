@@ -1,12 +1,17 @@
 const User = require('../models/User');
 const Transaction = require('../models/Transaction');
+const Payee = require('../models/Payee');
+const { sequelize } = require('../config/db');
 
 // @desc    Get current user profile
 // @route   GET /api/user/profile
 // @access  Private
 const getUserProfile = async (req, res) => {
   try {
-    const user = await User.findById(req.user.id).select('-password');
+    const user = await User.findByPk(req.user.id, {
+      attributes: { exclude: ['password'] },
+      include: [{ model: Payee, as: 'payees' }],
+    });
     if (user) {
       return res.status(200).json({
         success: true,
@@ -34,7 +39,7 @@ const depositMoney = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Please enter a valid amount greater than zero.' });
     }
 
-    const user = await User.findById(req.user.id);
+    const user = await User.findByPk(req.user.id);
     if (!user) {
       return res.status(404).json({ success: false, message: 'User not found.' });
     }
@@ -50,7 +55,7 @@ const depositMoney = async (req, res) => {
 
     // Create deposit transaction record
     const transaction = await Transaction.create({
-      userId: user._id,
+      userId: user.id,
       type: 'deposit',
       amount: depositAmount,
       category: category || 'other',
@@ -82,7 +87,7 @@ const withdrawMoney = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Please enter a valid amount greater than zero.' });
     }
 
-    const user = await User.findById(req.user.id);
+    const user = await User.findByPk(req.user.id);
     if (!user) {
       return res.status(404).json({ success: false, message: 'User not found.' });
     }
@@ -106,7 +111,7 @@ const withdrawMoney = async (req, res) => {
 
     // Create withdraw transaction record
     const transaction = await Transaction.create({
-      userId: user._id,
+      userId: user.id,
       type: 'withdraw',
       amount: withdrawAmount,
       category: category || 'other',
@@ -131,7 +136,10 @@ const withdrawMoney = async (req, res) => {
 const getTransactions = async (req, res) => {
   try {
     // Find all transactions for current user and sort descending (latest first)
-    const transactions = await Transaction.find({ userId: req.user.id }).sort({ createdAt: -1 });
+    const transactions = await Transaction.findAll({
+      where: { userId: req.user.id },
+      order: [['createdAt', 'DESC']],
+    });
 
     return res.status(200).json({
       success: true,
@@ -151,13 +159,14 @@ const deleteUserAccount = async (req, res) => {
   try {
     const userId = req.user.id;
 
-    // Delete all transactional records associated with the user
-    await Transaction.deleteMany({ userId });
+    // Delete all transactional and payee records associated with the user
+    await Transaction.destroy({ where: { userId } });
+    await Payee.destroy({ where: { userId } });
 
-    // Delete the user profile document
-    const deletedUser = await User.findByIdAndDelete(userId);
+    // Delete the user profile
+    const deletedUserCount = await User.destroy({ where: { id: userId } });
 
-    if (!deletedUser) {
+    if (deletedUserCount === 0) {
       return res.status(404).json({ success: false, message: 'Account not found or already deleted.' });
     }
 
@@ -175,6 +184,7 @@ const deleteUserAccount = async (req, res) => {
 // @route   POST /api/account/transfer
 // @access  Private
 const transferMoney = async (req, res) => {
+  const t = await sequelize.transaction();
   try {
     const { recipientIdentifier, amount } = req.body;
     const transferAmount = Number(amount);
@@ -185,31 +195,40 @@ const transferMoney = async (req, res) => {
     }
 
     // Fetch sender profile
-    const sender = await User.findById(req.user.id);
+    const sender = await User.findByPk(req.user.id, { transaction: t });
     if (!sender) {
+      await t.rollback();
       return res.status(404).json({ success: false, message: 'Sender account not found.' });
     }
 
     // Check card freeze
     if (sender.isCardFrozen) {
+      await t.rollback();
       return res.status(400).json({ success: false, message: 'Transaction blocked. Your virtual debit card is frozen.' });
     }
 
     // Check balance sufficiency
     if (sender.balance < transferAmount) {
+      await t.rollback();
       return res.status(400).json({ success: false, message: `Insufficient funds. Your current balance is ₹${sender.balance.toFixed(2)}.` });
     }
 
     // Look up recipient (look up by email if it contains '@', else by account number)
-    let query = {};
+    let recipient;
     if (recipientIdentifier.includes('@')) {
-      query = { email: recipientIdentifier.trim().toLowerCase() };
+      recipient = await User.findOne({
+        where: { email: recipientIdentifier.trim().toLowerCase() },
+        transaction: t,
+      });
     } else {
-      query = { accountNumber: recipientIdentifier.trim() };
+      recipient = await User.findOne({
+        where: { accountNumber: recipientIdentifier.trim() },
+        transaction: t,
+      });
     }
 
-    const recipient = await User.findOne(query);
     if (!recipient) {
+      await t.rollback();
       const errMsg = recipientIdentifier.includes('@') 
         ? 'The recipient email is not registered or wrong.' 
         : 'The recipient account number is not registered or wrong.';
@@ -217,7 +236,8 @@ const transferMoney = async (req, res) => {
     }
 
     // Prevent self-transfers
-    if (sender._id.equals(recipient._id)) {
+    if (sender.id === recipient.id) {
+      await t.rollback();
       return res.status(400).json({ success: false, message: 'Cannot transfer funds to your own account.' });
     }
 
@@ -225,26 +245,28 @@ const transferMoney = async (req, res) => {
     sender.balance -= transferAmount;
     recipient.balance += transferAmount;
     
-    await sender.save();
-    await recipient.save();
+    await sender.save({ transaction: t });
+    await recipient.save({ transaction: t });
 
     // Create Debit Transaction log (Sender)
     const debitTx = await Transaction.create({
-      userId: sender._id,
+      userId: sender.id,
       type: 'withdraw',
       amount: transferAmount,
       category: 'transfer',
       description: `Transfer to: ${recipient.name} (${recipient.email})`,
-    });
+    }, { transaction: t });
 
     // Create Credit Transaction log (Recipient)
-    const creditTx = await Transaction.create({
-      userId: recipient._id,
+    await Transaction.create({
+      userId: recipient.id,
       type: 'deposit',
       amount: transferAmount,
       category: 'transfer',
       description: `Transfer from: ${sender.name} (${sender.email})`,
-    });
+    }, { transaction: t });
+
+    await t.commit();
 
     return res.status(200).json({
       success: true,
@@ -254,6 +276,7 @@ const transferMoney = async (req, res) => {
     });
 
   } catch (error) {
+    await t.rollback();
     console.error('Transfer Error:', error);
     return res.status(500).json({ success: false, message: error.message || 'Server error processing transfer.' });
   }
@@ -264,7 +287,7 @@ const transferMoney = async (req, res) => {
 // @access  Private
 const toggleCardStatus = async (req, res) => {
   try {
-    const user = await User.findById(req.user.id);
+    const user = await User.findByPk(req.user.id);
     if (!user) {
       return res.status(404).json({ success: false, message: 'User not found.' });
     }
@@ -296,30 +319,42 @@ const addPayee = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Payee name and account number are required.' });
     }
 
-    const user = await User.findById(req.user.id);
+    const user = await User.findByPk(req.user.id);
     if (!user) {
       return res.status(404).json({ success: false, message: 'User not found.' });
     }
 
     // Check if recipient account exists in database
-    const checkRecipient = await User.findOne({ accountNumber });
+    const checkRecipient = await User.findOne({ where: { accountNumber } });
     if (!checkRecipient) {
       return res.status(404).json({ success: false, message: 'Cannot save: Account number does not exist.' });
     }
 
-    // Check for duplicate payee accountNumber
-    const duplicate = user.payees.find(p => p.accountNumber === accountNumber);
+    // Check for duplicate payee accountNumber for this user
+    const duplicate = await Payee.findOne({
+      where: {
+        userId: user.id,
+        accountNumber,
+      },
+    });
+
     if (duplicate) {
       return res.status(400).json({ success: false, message: 'Payee is already saved in your directory.' });
     }
 
-    user.payees.push({ name, accountNumber });
-    await user.save();
+    await Payee.create({
+      userId: user.id,
+      name,
+      accountNumber,
+    });
+
+    // Fetch all updated payees
+    const payees = await Payee.findAll({ where: { userId: user.id } });
 
     return res.status(200).json({
       success: true,
       message: `${name} has been added to your payees list.`,
-      payees: user.payees,
+      payees,
     });
   } catch (error) {
     console.error('Add Payee Error:', error);
@@ -333,18 +368,25 @@ const addPayee = async (req, res) => {
 const deletePayee = async (req, res) => {
   try {
     const { accountNumber } = req.params;
-    const user = await User.findById(req.user.id);
+    const user = await User.findByPk(req.user.id);
     if (!user) {
       return res.status(404).json({ success: false, message: 'User not found.' });
     }
 
-    user.payees = user.payees.filter(p => p.accountNumber !== accountNumber);
-    await user.save();
+    await Payee.destroy({
+      where: {
+        userId: user.id,
+        accountNumber,
+      },
+    });
+
+    // Fetch all updated payees
+    const payees = await Payee.findAll({ where: { userId: user.id } });
 
     return res.status(200).json({
       success: true,
       message: 'Payee deleted from your directory.',
-      payees: user.payees,
+      payees,
     });
   } catch (error) {
     console.error('Delete Payee Error:', error);
@@ -363,4 +405,3 @@ module.exports = {
   addPayee,
   deletePayee,
 };
-

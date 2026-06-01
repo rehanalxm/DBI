@@ -1,12 +1,11 @@
-const express = require('express');
-const cors = require('cors');
 const dotenv = require('dotenv');
-const connectDB = require('./config/db');
-
-// Load environmental configurations
 dotenv.config();
 
-// Connect to MongoDB database
+const express = require('express');
+const cors = require('cors');
+const { connectDB } = require('./config/db');
+
+// Connect to PostgreSQL database
 connectDB();
 
 const app = express();
